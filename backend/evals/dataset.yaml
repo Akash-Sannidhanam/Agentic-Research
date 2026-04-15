@@ -1,0 +1,49 @@
+# Eval dataset. Each entry drives one full agent run.
+#
+# Fields:
+#   id:     unique slug
+#   topic:  the research query fed to the agent
+#   kind:   "standard" (auto-approve everything) or "hitl" (apply scripted decisions)
+#   hitl:   optional; required when kind == "hitl"
+#     reject_source_indexes: list of indexes into state.sources to reject
+#       at the source_review checkpoint. Remaining sources are read.
+#     synthesis_feedback: string passed as human_feedback at the
+#       synthesis_review checkpoint. The draft phase should incorporate it.
+
+- id: climate-disclosure-eu
+  topic: "EU climate disclosure regulation impact on mid-cap firms in 2024"
+  kind: standard
+
+- id: gpu-shortage-ai
+  topic: "impact of GPU supply constraints on AI startups in 2024"
+  kind: standard
+
+- id: glp1-cardiovascular
+  topic: "cardiovascular effects of GLP-1 weight loss drugs"
+  kind: standard
+
+- id: remote-work-cre
+  topic: "impact of remote work on commercial real estate vacancy in major US cities"
+  kind: standard
+
+- id: rust-systems-adoption
+  topic: "state of Rust adoption in systems programming in 2024"
+  kind: standard
+
+- id: black-sea-grain
+  topic: "collapse of the Black Sea grain deal and global food markets"
+  kind: standard
+
+- id: crypto-regulation-us
+  topic: "2024 US crypto regulation landscape"
+  kind: hitl
+  hitl:
+    reject_source_indexes: [1, 3]
+    synthesis_feedback: "emphasize SEC enforcement actions over pending legislation"
+
+- id: nuclear-smr-datacenters
+  topic: "nuclear power revival for AI data centers"
+  kind: hitl
+  hitl:
+    reject_source_indexes: []
+    synthesis_feedback: "focus specifically on small modular reactors and named utility partnerships"

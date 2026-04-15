@@ -20,3 +20,9 @@ frontend/.env.local
 # AI assistant context (local only)
 CLAUDE.md
 AGENTS.md
+
+# Eval runs and cached source content (not checked in)
+backend/evals/results/run-*.json
+backend/evals/results/run-*.md
+backend/evals/cache/
+
