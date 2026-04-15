@@ -198,19 +198,19 @@ class ResearchAgent:
         yield {"type": "trace", "entry": entry.to_dict(), "state": self.state.to_dict()}
 
     async def _phase_read(self) -> AsyncIterator[dict]:
-        """Read the selected (or all) sources."""
+        """Read the selected (or all) sources concurrently."""
         self.state.phase = Phase.READ
 
         # Use human-selected sources if provided, otherwise top 5
         to_read = self.state.selected_sources or self.state.sources[:5]
 
-        for source in to_read:
+        async def fetch_one(source: dict) -> dict:
             t0 = time.time()
             try:
                 content = await self._retry(read_url, source["url"])
             except Exception as e:
                 content = f"[Error fetching {source['url']}: {e}]"
-
+            source["content"] = content
             entry = self.state.add_trace(
                 phase="read",
                 action="fetch_url",
@@ -218,8 +218,11 @@ class ResearchAgent:
                 output=content[:300],
                 duration_ms=int((time.time() - t0) * 1000),
             )
-            source["content"] = content
-            yield {"type": "trace", "entry": entry.to_dict(), "state": self.state.to_dict()}
+            return {"type": "trace", "entry": entry.to_dict(), "state": self.state.to_dict()}
+
+        tasks = [asyncio.create_task(fetch_one(src)) for src in to_read]
+        for completed in asyncio.as_completed(tasks):
+            yield await completed
 
     async def _phase_synthesize(self) -> AsyncIterator[dict]:
         """Use Claude to summarize each source."""
