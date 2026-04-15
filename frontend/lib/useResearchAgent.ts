@@ -17,6 +17,8 @@ export interface TraceEntry {
   input: string;
   output: string;
   token_count: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
   cost_usd: number;
   duration_ms: number;
   timestamp: number;
