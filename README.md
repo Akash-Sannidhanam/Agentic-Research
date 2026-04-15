@@ -150,6 +150,12 @@ backend/
     reader.py       URL fetcher + HTML-to-text
   api/
     server.py       FastAPI app + WebSocket endpoint
+  evals/
+    dataset.yaml    fixed topic set (standard + scripted HITL cases)
+    runner.py       drives the agent headless, auto-answers checkpoints
+    graders/        deterministic checks, HITL invariants, LLM-as-judge
+    report.py       JSON + Markdown scorecard, baseline diff
+    __main__.py     CLI entry point
   run.py            uvicorn entry point
 frontend/
   app/page.tsx
@@ -169,6 +175,42 @@ python tests/test_read_phase.py
 
 `test_state.py` covers the state machine (phase transitions, trace aggregation, cost math). `test_read_phase.py` exercises the read phase against a stubbed reader to verify parallel fetching and per-source error isolation. The remaining agent loop, tools, and WebSocket protocol are not covered yet.
 
+## Evals
+
+End-to-end quality check over a fixed dataset of research topics. Answers _"did this change make the brief better or worse?"_ before merging.
+
+```bash
+python -m backend.evals                              # full suite (~$2–3)
+python -m backend.evals --subset smoke               # first 3 topics, smoke run
+python -m backend.evals --topics gpu-shortage-ai     # comma-separated IDs
+python -m backend.evals --baseline backend/evals/results/baseline.json
+python -m backend.evals --no-cache                   # re-fetch source content
+```
+
+### What gets measured
+
+Each topic runs the full agent (search → read → synthesize → draft), auto-approving HITL checkpoints. Two dataset entries are scripted-HITL: they reject specific sources and pass synthesis feedback, and their drafts are checked with invariants (the rejected URLs must not appear, feedback keywords should).
+
+Grading is layered:
+
+| Layer | How | Scores |
+| --- | --- | --- |
+| Deterministic | Regex/parser on the draft | `structure_score` 0 or 1 — gates the judge |
+| Invariants (HITL only) | Pure functions on draft + HITL config | pass/fail per check |
+| LLM-as-judge | Claude Haiku 4.5, tool-use for structured output | 1–5 on faithfulness, specificity, coverage, citation quality |
+
+A structure fail skips the LLM judge for that topic and sets its scores to 0 — a broken brief shouldn't get graded on prose.
+
+### Output
+
+Every run writes `backend/evals/results/run-<UTC_ISO>.json` and `run-<UTC_ISO>.md`. The Markdown scorecard shows aggregate means, a per-topic table (composite, F/S/C/CQ dimensions, citation coverage, structure, cost, time), and per-topic rationales. With `--baseline`, a diff section is appended; any judge-dimension drop ≥ 0.5 is flagged as a regression.
+
+### Cost controls
+
+- Source content is cached on disk under `backend/evals/cache/`. First run fetches; later runs skip the network and pay only for Claude calls.
+- The LLM judge uses Haiku 4.5 (≈3× cheaper than Sonnet) with its rubric system prompt marked cacheable.
+- `--subset smoke` runs 3 topics for quick iteration.
+
 ## Known limitations
 
 - **Localhost-only for now.** Backend CORS is pinned to `http://localhost:3000` and the frontend's WebSocket URL is pinned to `ws://localhost:8000/ws/research`. Both will be parameterized once the project is deployed.
@@ -179,7 +221,6 @@ python tests/test_read_phase.py
 
 ## Roadmap
 
-- Eval suite with quality metrics across a fixed topic set
 - `/history` page showing past runs with cost breakdowns
 - Per-phase model routing (Sonnet for summaries, Opus for final draft)
 - Structured outputs via tool-use JSON schema for the final brief
