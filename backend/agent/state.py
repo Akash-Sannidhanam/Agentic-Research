@@ -28,6 +28,8 @@ class TraceEntry:
     input: str = ""
     output: str = ""
     token_count: int = 0
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
     cost_usd: float = 0.0
     duration_ms: int = 0
     timestamp: float = field(default_factory=time.time)
@@ -41,6 +43,8 @@ class TraceEntry:
             "input": self.input[:200],  # truncate for frontend
             "output": self.output[:500],
             "token_count": self.token_count,
+            "cache_creation_tokens": self.cache_creation_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
             "cost_usd": round(self.cost_usd, 6),
             "duration_ms": self.duration_ms,
             "timestamp": self.timestamp,

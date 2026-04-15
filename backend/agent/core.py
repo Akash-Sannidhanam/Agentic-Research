@@ -11,13 +11,98 @@ import anthropic
 from .state import AgentState, Phase, TraceEntry
 from ..tools import search_web, read_url
 
-# Claude pricing (Sonnet 4) per 1M tokens
+# Claude pricing (Sonnet 4) per 1M tokens.
+# Cache write (5-min TTL) is 1.25× input; cache read is 0.1× input.
 INPUT_COST_PER_M = 3.00
 OUTPUT_COST_PER_M = 15.00
+CACHE_WRITE_COST_PER_M = INPUT_COST_PER_M * 1.25  # $3.75
+CACHE_READ_COST_PER_M = INPUT_COST_PER_M * 0.10   # $0.30
 
 
-def _estimate_cost(input_tokens: int, output_tokens: int) -> float:
-    return (input_tokens * INPUT_COST_PER_M + output_tokens * OUTPUT_COST_PER_M) / 1_000_000
+def _estimate_cost(
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+) -> float:
+    # input_tokens is the uncached remainder; the three input buckets are additive.
+    return (
+        input_tokens * INPUT_COST_PER_M
+        + cache_creation_tokens * CACHE_WRITE_COST_PER_M
+        + cache_read_tokens * CACHE_READ_COST_PER_M
+        + output_tokens * OUTPUT_COST_PER_M
+    ) / 1_000_000
+
+
+# Frozen system prompts — kept byte-stable to preserve the prompt-cache prefix.
+# Anything dynamic (topic, sources, feedback) MUST stay in the user message.
+# Sonnet 4's minimum cacheable prefix is 1024 tokens; SYNTHESIZE_SYSTEM_PROMPT
+# is sized to comfortably clear that threshold.
+
+SYNTHESIZE_SYSTEM_PROMPT = """You are a senior research analyst preparing source-by-source briefings for a downstream synthesis step. Your only job in this turn is to extract what matters from a single source so it can be combined with others later. You are not writing the final brief; you are preparing structured notes for it.
+
+# Output format
+
+Produce 3 to 5 bullet points and nothing else. No preamble, no closing remarks, no headings, no meta-commentary about the source. Each bullet starts with `- ` and is one to three sentences. Order bullets by importance: most load-bearing fact first.
+
+# What belongs in a bullet
+
+Each bullet must carry information that would change a reader's understanding of the topic. Prefer:
+
+- Specific numbers, percentages, dates, durations, monetary amounts, and named entities (people, organizations, products, jurisdictions). When the source gives a precise figure, use the precise figure — do not round or hedge unless the source itself hedged.
+- Causal claims and mechanisms ("X happens because Y"), not just observations.
+- Comparisons and benchmarks ("twice the rate of the prior year", "the largest in the sector since 2019").
+- Concrete examples that illustrate a general claim.
+- Direct quotes when the wording itself is the news (regulatory language, official statements, controversial framings). Quote sparingly — at most one quoted bullet per source — and reproduce the wording verbatim inside double quotes.
+
+What does not belong in a bullet:
+
+- Generic background that any reader of the topic would already know.
+- The source's own throat-clearing ("This article will explore...", "In recent years...").
+- Author opinions presented as fact, unless explicitly attributed.
+- Restating the source's title or URL.
+
+# Handling uncertainty and provenance
+
+When the source itself flags uncertainty — forecasts, projections, anonymous sourcing, leaked documents, single-source claims — preserve that hedge in your bullet. Use phrases like "the source projects", "according to an unnamed official", "the company stated in a press release", or "preliminary data suggests". The downstream step needs to know what is established versus speculative.
+
+If two parts of the source contradict each other, surface the contradiction in a single bullet rather than picking a side. Example: `- The press release claims a 30% reduction, but the linked methodology footnote describes a 12% baseline-adjusted figure.`
+
+If the source is paywalled, truncated, or appears to be only navigational chrome with no substance, return a single bullet: `- [Source provided no extractable content beyond [briefly describe what you saw]].` Do not invent.
+
+# Faithfulness rules
+
+- Never introduce facts that are not in the provided source content. If the topic asks about X but the source is about Y, your bullets describe Y and that is fine — the synthesis step decides what to keep.
+- Do not merge facts from different parts of the source into a single claim if doing so changes the meaning.
+- Preserve the source's own units, dates, and proper nouns. Do not convert currencies, translate dates, or anglicize names unless the source did.
+- If the source contains a number that looks suspicious (e.g., obviously a typo, or contradicts a widely-known fact), still report it as written — flag the suspicion in a parenthetical, do not silently correct it.
+
+# Worked example
+
+Topic: "impact of remote work on commercial real estate vacancy"
+
+Source content (excerpt): "Manhattan office availability hit 18.4% in Q3 2024, up from 11.9% pre-pandemic, per Cushman & Wakefield. The brokerage attributes 60% of that gap to hybrid work patterns and the remainder to a 2023 supply wave from buildings begun in 2019. Class A trophy assets remain near 95% leased; the vacancy is concentrated in Class B and C product built before 1990. 'We are watching a structural repricing, not a cyclical dip,' said the firm's head of research."
+
+Acceptable output:
+
+- Manhattan office availability reached 18.4% in Q3 2024, up from 11.9% pre-pandemic, per Cushman & Wakefield.
+- The brokerage attributes ~60% of the increase to hybrid work and the remainder to a 2023 supply wave from buildings started in 2019.
+- Vacancy is bifurcated: Class A trophy assets remain near 95% leased while Class B and C buildings constructed before 1990 absorb most of the slack.
+- Cushman & Wakefield's head of research framed the trend as "a structural repricing, not a cyclical dip" — language that signals their internal view rather than a transient correction.
+
+That is the standard. Apply it to whatever source the user provides next."""
+
+
+DRAFT_SYSTEM_PROMPT = """You are a senior research analyst writing the final research brief based on per-source notes that have already been distilled by an earlier step.
+
+Structure the brief as:
+1. A two-sentence executive summary at the top.
+2. Three to five sections with markdown `##` headers, each covering a coherent sub-theme of the topic.
+3. A `## Key Takeaways` section at the end with three to five bullets.
+
+Cite sources inline using markdown link syntax: `[Source Title](url)`. Every non-trivial claim should carry a citation. When two sources support the same point, cite both. When sources disagree, name the disagreement explicitly and cite each side.
+
+Be specific. Use the numbers, names, and dates that appear in the source notes — do not hedge or round when a precise figure was given. Flag any contradictions between sources rather than smoothing them over. If the user has supplied additional instructions in their message, treat those as overrides to this default structure where they conflict."""
 
 
 class ResearchAgent:
@@ -153,22 +238,29 @@ class ResearchAgent:
                 continue
 
             t0 = time.time()
-            prompt = (
-                f"Summarize this content in 3-5 bullet points, focusing on key facts "
-                f"relevant to the research topic: '{self.state.topic}'.\n\n"
-                f"Source: {source['title']}\n\n{content}"
+            user_message = (
+                f"Research topic: {self.state.topic}\n\n"
+                f"Source title: {source.get('title', '')}\n\n"
+                f"Content:\n{content}"
             )
 
             response = await self.client.messages.create(
                 model=self.model,
                 max_tokens=500,
-                messages=[{"role": "user", "content": prompt}],
+                system=[{
+                    "type": "text",
+                    "text": SYNTHESIZE_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                messages=[{"role": "user", "content": user_message}],
             )
 
             summary_text = response.content[0].text
             input_tokens = response.usage.input_tokens
             output_tokens = response.usage.output_tokens
-            cost = _estimate_cost(input_tokens, output_tokens)
+            cache_creation = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+            cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+            cost = _estimate_cost(input_tokens, output_tokens, cache_creation, cache_read)
 
             self.state.summaries.append({
                 "url": source["url"],
@@ -181,7 +273,9 @@ class ResearchAgent:
                 action="summarize_source",
                 input=source["url"],
                 output=summary_text[:300],
-                token_count=input_tokens + output_tokens,
+                token_count=input_tokens + output_tokens + cache_creation + cache_read,
+                cache_creation_tokens=cache_creation,
+                cache_read_tokens=cache_read,
                 cost_usd=cost,
                 duration_ms=int((time.time() - t0) * 1000),
             )
@@ -200,39 +294,40 @@ class ResearchAgent:
 
         extra_instructions = ""
         if self.state.human_feedback:
-            extra_instructions = f"\n\nAdditional instructions from the user: {self.state.human_feedback}"
+            extra_instructions = (
+                f"\n\nAdditional instructions from the user: {self.state.human_feedback}"
+            )
 
-        prompt = (
-            f"You are a research analyst. Based on the following source summaries, "
-            f"write a well-structured research brief on: '{self.state.topic}'.\n\n"
-            f"Requirements:\n"
-            f"- Start with a 2-sentence executive summary\n"
-            f"- Organize into 3-5 sections with headers\n"
-            f"- Cite sources inline as [Source Title](url)\n"
-            f"- End with 'Key Takeaways' (3-5 bullets)\n"
-            f"- Be specific — use numbers, names, dates when available\n"
-            f"- Flag any contradictions between sources\n"
+        user_message = (
+            f"Research topic: {self.state.topic}\n"
             f"{extra_instructions}\n\n"
             f"Source summaries:\n\n{summaries_text}"
         )
 
+        # Single call per run — no cache_control: a 1.25× write premium with
+        # zero subsequent reads is a net loss.
         response = await self.client.messages.create(
             model=self.model,
             max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}],
+            system=DRAFT_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
         )
 
         self.state.draft = response.content[0].text
         input_tokens = response.usage.input_tokens
         output_tokens = response.usage.output_tokens
-        cost = _estimate_cost(input_tokens, output_tokens)
+        cache_creation = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+        cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+        cost = _estimate_cost(input_tokens, output_tokens, cache_creation, cache_read)
 
         entry = self.state.add_trace(
             phase="draft",
             action="generate_draft",
             input=f"Topic: {self.state.topic}, {len(self.state.summaries)} summaries",
             output=self.state.draft[:500],
-            token_count=input_tokens + output_tokens,
+            token_count=input_tokens + output_tokens + cache_creation + cache_read,
+            cache_creation_tokens=cache_creation,
+            cache_read_tokens=cache_read,
             cost_usd=cost,
             duration_ms=int((time.time() - t0) * 1000),
         )

@@ -101,6 +101,8 @@ The agent moves through four phases. Between them are two human-in-the-loop gate
 
 Transient 5xx errors during `search` and `read` are retried twice with exponential backoff (1s, 2s). 4xx errors are logged and skipped — the run continues with the sources that did load.
 
+The `synthesize` phase uses [prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) on its system prompt: the first source pays the ~1.25× cache-write premium, subsequent sources hit the cache at ~0.1× input cost. Each trace entry surfaces `cache_creation_tokens` and `cache_read_tokens` so you can see this directly. The `draft` phase runs once per run and is not cached.
+
 ## WebSocket API
 
 Useful if you want to drive the backend from something other than the Next.js UI.
@@ -175,7 +177,6 @@ The suite covers the state machine (phase transitions, trace aggregation, cost m
 
 - Eval suite with quality metrics across a fixed topic set
 - `/history` page showing past runs with cost breakdowns
-- Prompt caching across system prompts and tool definitions
 - Parallelize source reading with `asyncio.gather`
 - Per-phase model routing (Sonnet for summaries, Opus for final draft)
 - Structured outputs via tool-use JSON schema for the final brief

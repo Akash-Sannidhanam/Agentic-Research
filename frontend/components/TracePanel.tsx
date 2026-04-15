@@ -65,9 +65,27 @@ export default function TracePanel({ trace }: { trace: TraceEntry[] }) {
                   <div className="text-danger text-xs mt-0.5">{entry.error}</div>
                 )}
               </div>
-              <div className="text-right font-mono tabular-nums text-xs text-fg-subtle shrink-0">
-                <div>{entry.duration_ms}ms</div>
-                {entry.cost_usd > 0 && <div>${entry.cost_usd.toFixed(4)}</div>}
+              <div className="flex items-center gap-2 shrink-0">
+                {entry.cache_read_tokens > 0 && (
+                  <span
+                    className="rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide"
+                    title={`${entry.cache_read_tokens} tokens served from prompt cache`}
+                  >
+                    cache hit · {entry.cache_read_tokens}
+                  </span>
+                )}
+                {entry.cache_creation_tokens > 0 && (
+                  <span
+                    className="rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide"
+                    title={`${entry.cache_creation_tokens} tokens written to prompt cache (paid 1.25× input premium)`}
+                  >
+                    cache write · {entry.cache_creation_tokens}
+                  </span>
+                )}
+                <div className="text-right font-mono tabular-nums text-xs text-fg-subtle">
+                  <div>{entry.duration_ms}ms</div>
+                  {entry.cost_usd > 0 && <div>${entry.cost_usd.toFixed(4)}</div>}
+                </div>
               </div>
             </div>
           );
