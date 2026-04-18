@@ -32,7 +32,7 @@ flowchart LR
     ui[Next.js UI<br/>localhost:3000] <-- WebSocket --> api[FastAPI<br/>localhost:8000]
     api --> tavily[Tavily Search API]
     api --> fetch[httpx + BeautifulSoup]
-    api --> claude[Anthropic API<br/>Claude Sonnet 4]
+    api --> claude[Anthropic API<br/>Sonnet 4.6 synth / Opus 4.7 draft]
 ```
 
 ## Stack
@@ -42,7 +42,7 @@ flowchart LR
 | Backend    | Python 3.13, FastAPI, uvicorn, httpx, BeautifulSoup             |
 | Frontend   | Next.js 16, React 19, TypeScript, Tailwind CSS 4, react-markdown |
 | Transport  | WebSocket (`/ws/research`)                                      |
-| Model      | Claude Sonnet 4 (`claude-sonnet-4-20250514`)                    |
+| Models     | `claude-sonnet-4-6` (per-source synth) + `claude-opus-4-7` (final draft) |
 | Search     | Tavily                                                          |
 
 ## Prerequisites
@@ -95,11 +95,13 @@ The agent moves through four phases. Between them are two human-in-the-loop gate
 1. **`search`** — Tavily returns up to 8 results for the topic.
 2. **Checkpoint 1 — `source_review`** — you pick which sources to read; rejecting ends the run.
 3. **`read`** — each selected URL is fetched with `httpx` and cleaned with BeautifulSoup (scripts, nav, footers stripped; text capped at 8 KB per source). Fetches run **in parallel** via `asyncio.as_completed`, so this phase takes roughly the slowest single fetch instead of the sum.
-4. **`synthesize`** — Claude produces a 3-5 bullet summary per source.
+4. **`synthesize`** — Claude Sonnet 4.6 produces a 3-5 bullet summary per source.
 5. **Checkpoint 2 — `synthesis_review`** — you can add feedback to steer the draft; rejecting ends the run.
-6. **`draft`** — Claude generates a structured brief (executive summary, sections, citations, takeaways).
+6. **`draft`** — Claude Opus 4.7 generates a structured brief (executive summary, sections, citations, takeaways).
 
 Transient 5xx errors during `search` and `read` are retried twice with exponential backoff (1s, 2s). 4xx errors are logged and skipped — the run continues with the sources that did load.
+
+The two Claude phases use different models: `synthesize` runs on Sonnet 4.6 (cheaper, called N times — once per source), while `draft` runs on Opus 4.7 (higher quality on the single creative-synthesis call at the end). Pricing is tabled per model in `backend/agent/core.py` and cost is computed per-trace.
 
 The `synthesize` phase uses [prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) on its system prompt: the first source pays the ~1.25× cache-write premium, subsequent sources hit the cache at ~0.1× input cost. Each trace entry surfaces `cache_creation_tokens` and `cache_read_tokens` so you can see this directly. The `draft` phase runs once per run and is not cached.
 
@@ -214,7 +216,7 @@ Every run writes `backend/evals/results/run-<UTC_ISO>.json` and `run-<UTC_ISO>.m
 ## Known limitations
 
 - **Localhost-only for now.** Backend CORS is pinned to `http://localhost:3000` and the frontend's WebSocket URL is pinned to `ws://localhost:8000/ws/research`. Both will be parameterized once the project is deployed.
-- **Cost math assumes Sonnet pricing.** Rates are hardcoded in `backend/agent/state.py`; swapping models without updating them will produce wrong numbers.
+- **Cost math has a fixed per-model pricing table.** Rates for `claude-sonnet-4-6` and `claude-opus-4-7` are hardcoded in `backend/agent/core.py`; routing to a third model requires adding an entry.
 - **No token streaming.** The WebSocket streams _events_ (trace steps, checkpoints, final draft), not tokens. Claude responses arrive whole.
 - **4xx fetches degrade silently.** A 404 or 403 on a source is logged as an error trace entry but does not fail the run.
 - **No persistence.** Each run is held in memory; closing the tab loses everything.
@@ -222,7 +224,6 @@ Every run writes `backend/evals/results/run-<UTC_ISO>.json` and `run-<UTC_ISO>.m
 ## Roadmap
 
 - `/history` page showing past runs with cost breakdowns
-- Per-phase model routing (Sonnet for summaries, Opus for final draft)
 - Structured outputs via tool-use JSON schema for the final brief
 
 ## License

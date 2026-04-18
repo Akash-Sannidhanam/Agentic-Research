@@ -11,26 +11,28 @@ import anthropic
 from .state import AgentState, Phase, TraceEntry
 from ..tools import search_web, read_url
 
-# Claude pricing (Sonnet 4) per 1M tokens.
+# Claude pricing per 1M tokens: (input, output).
 # Cache write (5-min TTL) is 1.25× input; cache read is 0.1× input.
-INPUT_COST_PER_M = 3.00
-OUTPUT_COST_PER_M = 15.00
-CACHE_WRITE_COST_PER_M = INPUT_COST_PER_M * 1.25  # $3.75
-CACHE_READ_COST_PER_M = INPUT_COST_PER_M * 0.10   # $0.30
+_PRICING = {
+    "claude-sonnet-4-6": (3.00, 15.00),
+    "claude-opus-4-7":   (5.00, 25.00),
+}
 
 
 def _estimate_cost(
+    model: str,
     input_tokens: int,
     output_tokens: int,
     cache_creation_tokens: int = 0,
     cache_read_tokens: int = 0,
 ) -> float:
     # input_tokens is the uncached remainder; the three input buckets are additive.
+    input_rate, output_rate = _PRICING[model]
     return (
-        input_tokens * INPUT_COST_PER_M
-        + cache_creation_tokens * CACHE_WRITE_COST_PER_M
-        + cache_read_tokens * CACHE_READ_COST_PER_M
-        + output_tokens * OUTPUT_COST_PER_M
+        input_tokens * input_rate
+        + cache_creation_tokens * input_rate * 1.25
+        + cache_read_tokens * input_rate * 0.10
+        + output_tokens * output_rate
     ) / 1_000_000
 
 
@@ -96,9 +98,9 @@ That is the standard. Apply it to whatever source the user provides next."""
 DRAFT_SYSTEM_PROMPT = """You are a senior research analyst writing the final research brief based on per-source notes that have already been distilled by an earlier step.
 
 Structure the brief as:
-1. A two-sentence executive summary at the top.
-2. Three to five sections with markdown `##` headers, each covering a coherent sub-theme of the topic.
-3. A `## Key Takeaways` section at the end with three to five bullets.
+1. A two-sentence executive summary at the top, with no heading.
+2. Three to five body sections with markdown `##` headers, each covering a coherent sub-theme of the topic.
+3. A final `## Key Takeaways` section with three to five bullet points. This section is mandatory — always include it as the last section, even if the body sections feel complete.
 
 Cite sources inline using markdown link syntax: `[Source Title](url)`. Every non-trivial claim should carry a citation. When two sources support the same point, cite both. When sources disagree, name the disagreement explicitly and cite each side.
 
@@ -116,9 +118,15 @@ class ResearchAgent:
                 agent.submit_human_decision("approve")
     """
 
-    def __init__(self, topic: str, model: str = "claude-sonnet-4-20250514"):
+    def __init__(
+        self,
+        topic: str,
+        synth_model: str = "claude-sonnet-4-6",
+        draft_model: str = "claude-opus-4-7",
+    ):
         self.state = AgentState(topic=topic)
-        self.model = model
+        self.synth_model = synth_model
+        self.draft_model = draft_model
         self.client = anthropic.AsyncAnthropic()
         self._human_event: asyncio.Event = asyncio.Event()
         self._max_retries = 2
@@ -248,7 +256,7 @@ class ResearchAgent:
             )
 
             response = await self.client.messages.create(
-                model=self.model,
+                model=self.synth_model,
                 max_tokens=500,
                 system=[{
                     "type": "text",
@@ -263,7 +271,7 @@ class ResearchAgent:
             output_tokens = response.usage.output_tokens
             cache_creation = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
             cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
-            cost = _estimate_cost(input_tokens, output_tokens, cache_creation, cache_read)
+            cost = _estimate_cost(self.synth_model, input_tokens, output_tokens, cache_creation, cache_read)
 
             self.state.summaries.append({
                 "url": source["url"],
@@ -310,8 +318,8 @@ class ResearchAgent:
         # Single call per run — no cache_control: a 1.25× write premium with
         # zero subsequent reads is a net loss.
         response = await self.client.messages.create(
-            model=self.model,
-            max_tokens=2000,
+            model=self.draft_model,
+            max_tokens=4000,
             system=DRAFT_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],
         )
@@ -321,7 +329,7 @@ class ResearchAgent:
         output_tokens = response.usage.output_tokens
         cache_creation = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
         cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
-        cost = _estimate_cost(input_tokens, output_tokens, cache_creation, cache_read)
+        cost = _estimate_cost(self.draft_model, input_tokens, output_tokens, cache_creation, cache_read)
 
         entry = self.state.add_trace(
             phase="draft",
