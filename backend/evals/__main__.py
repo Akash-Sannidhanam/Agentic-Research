@@ -28,10 +28,9 @@ HERE = Path(__file__).parent
 DATASET_PATH = HERE / "dataset.yaml"
 RESULTS_DIR = HERE / "results"
 
-# Matches the models the agent itself uses. If the agent routes per-phase in
-# the future, this list will need to expand.
-SYNTH_MODEL = "claude-sonnet-4-20250514"
-DRAFT_MODEL = "claude-sonnet-4-20250514"
+# Matches the models the agent itself uses (routed per-phase).
+SYNTH_MODEL = "claude-sonnet-4-6"
+DRAFT_MODEL = "claude-opus-4-7"
 
 
 def _parse_args() -> argparse.Namespace:
